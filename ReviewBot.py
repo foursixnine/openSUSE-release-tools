@@ -111,7 +111,8 @@ class ReviewBot(object):
         self.logger = logger
         self.review_user = user
         self.review_group = group
-        self.requests: List[osc.core.Request] = []
+        # self.requests: List[osc.core.Request] = []
+        self.requests = []
         self.review_messages = ReviewBot.DEFAULT_REVIEW_MESSAGES
         self._review_mode: ReviewChoices = ReviewChoices.NORMAL
         self.fallback_user = None

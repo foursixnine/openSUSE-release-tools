@@ -29,7 +29,7 @@ class OpenQABot(ReviewBot.ReviewBot):
     """
 
     def __init__(self, *args, **kwargs):
-        super(OpenQABot, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.tgt_repo = {}
         self.project_settings = {}
         self.api_map = {}
@@ -37,6 +37,7 @@ class OpenQABot(ReviewBot.ReviewBot):
         self.force = False
         self.openqa = None
         self.commentapi = CommentAPI(self.apiurl)
+        self.gitea = None
 
     def gather_test_builds(self):
         for prj, u in self.tgt_repo[self.openqa.baseurl].items():
@@ -593,3 +594,37 @@ class OpenQABot(ReviewBot.ReviewBot):
         self.comment_write(project=str(incident_project), state=state,
                            result=result, message=msg,
                            info_extra={'revision': str(mesh_job.get('openqa_build'))})
+
+    def setup_open_pr(self, project, branch, build_bot_username):
+
+        self.logger.debug(f"Getting open PR for '{project}' targeting '{branch}'")
+        self.requests = self.gitea.get_open_prs_for_project_branch(project, branch, build_bot_username)
+
+    def has_build_finished(self, request):
+        request.get_reviews_by_timeline(self.gitea)
+        if request.is_build_finished():
+            self.logger.debug(f"{request} build finished")
+            return True
+        else:
+            self.logger.debug(f"{request} has not finished the build")
+            return False
+
+    def terminamos_los_tests(self, project, request):
+        # somwehere
+        {
+            'https://src.opensuse.org/products/PackageHub#16.0': 'openSUSE:Backports:SLE-16.0'
+        }
+        # version = "16.0"
+        # TODO: read it from config somewhere (env or file)
+
+        # obs_project_name = f"openSUSE:Backports:SLE-{version}:PullRequest:{request}"
+        return None
+
+    def marcarcamos_el_check_en_gitea(self, project, request, state):
+        self.logger.debug(f"marcarcamos_el_check_en_gitea: {project} {request}: {state}")
+
+    def comentamos_en_gitea(self, project, request, mensaje):
+        self.logger.debug(f"comentamos_en_gitea {project} {request}: {mensaje}")
+
+    def dispara_los_tests_para_projecto_pr(self, project, request):
+        self.logger.debug(f"openqa POST isos {project} {request}")
