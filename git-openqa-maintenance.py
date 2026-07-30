@@ -11,29 +11,33 @@ from lxml import etree as ET
 from collections import namedtuple
 import osc.core
 
-dry_run = False
-openqa_dry_run = False
-USER_AGENT = "git-openqa-maintenance (https://github.com/openSUSE/openSUSE-release-tools)"
+dry_run = True
+openqa_dry_run = True
+USER_AGENT = (
+    "git-openqa-maintenance (https://github.com/openSUSE/openSUSE-release-tools)"
+)
 
 log = logging.getLogger(sys.argv[0] if __name__ == "__main__" else __name__)
 log.setLevel(logging.DEBUG)
 handler = logging.StreamHandler()
-formatter = logging.Formatter("%(name)-2s %(levelname)-2s %(funcName)s:%(lineno)d: %(message)s")
+formatter = logging.Formatter(
+    "%(name)-2s %(levelname)-2s %(funcName)s:%(lineno)d: %(message)s"
+)
 handler.setFormatter(formatter)
 log.addHandler(handler)
 
 CONFIG_DATA = {
     "products/PackageHub": {
         "repo_template": "openSUSE:Backports:SLE-{version}:PullRequest:{pr_id}",
-        "OS_TEST_TEMPLATE": "openSUSE:/Backports:/SLE-{version}:/PullRequest:/@INCIDENTNR@/standard"
+        "OS_TEST_TEMPLATE": "openSUSE:/Backports:/SLE-{version}:/PullRequest:/@INCIDENTNR@/standard",
     },
     "openSUSE/Leap": {
         "repo_template": "openSUSE:Leap:{version}:PullRequest:{pr_id}",
-        "OS_TEST_TEMPLATE": "openSUSE:/Leap:/{version}:/PullRequest:/@INCIDENTNR@/standard"
+        "OS_TEST_TEMPLATE": "openSUSE:/Leap:/{version}:/PullRequest:/@INCIDENTNR@/standard",
     },
     "openSUSE/LeapNonFree": {
         "repo_template": "openSUSE:Leap:{version}:NonFree:PullRequest:{pr_id}",
-        "OS_TEST_TEMPLATE": "openSUSE:/Leap:/{version}:/NonFree:/PullRequest:/@INCIDENTNR@/standard"
+        "OS_TEST_TEMPLATE": "openSUSE:/Leap:/{version}:/NonFree:/PullRequest:/@INCIDENTNR@/standard",
     },
 }
 
@@ -43,6 +47,7 @@ BS_HOST = None
 REPO_PREFIX = None
 REVIEW_GROUP = None
 openqa = None
+OPENQA_FORCE_NEW_BUILD = ""
 
 # Variables to know status of QA
 QA_UNKNOWN = 0
@@ -53,20 +58,32 @@ QA_PASSED = 3
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--myself", help="Username of bot", default="openqa-maintenance")
+    parser.add_argument(
+        "--myself", help="Username of bot", default="openqa-maintenance"
+    )
     parser.add_argument(
         "--review-group",
         help="Group to be used for approval",
         default="@qam-openqa-review",
     )
-    parser.add_argument("--openqa-host", help="OpenQA instance url", default="http://localhost:9526")
-    parser.add_argument("--verbose", help="Verbosity", default="1", type=int, choices=[0, 1, 2, 3])
+    parser.add_argument(
+        "--openqa-host", help="OpenQA instance url", default="http://localhost:9526"
+    )
+    parser.add_argument(
+        "--verbose", help="Verbosity", default="1", type=int, choices=[0, 1, 2, 3]
+    )
     parser.add_argument("--branch", help="Target branch, eg. leap-16.0")
     parser.add_argument("--project", help="Target project")
     parser.add_argument("--pr-id", help="PR to trigger tests for")
-    parser.add_argument("--gitea", help="Gitea instance to use", default="https://src.opensuse.org")
-    parser.add_argument("--bs", help="Build service api", default="https://api.opensuse.org")
-    parser.add_argument("--bs-bot", help="Build service bot", default="autogits_obs_staging_bot")
+    parser.add_argument(
+        "--gitea", help="Gitea instance to use", default="https://src.opensuse.org"
+    )
+    parser.add_argument(
+        "--bs", help="Build service api", default="https://api.opensuse.org"
+    )
+    parser.add_argument(
+        "--bs-bot", help="Build service bot", default="autogits_obs_staging_bot"
+    )
     parser.add_argument(
         "--repo-prefix",
         help="Build service repository",
@@ -91,7 +108,10 @@ def get_open_prs_for_project_branch(project, branch):
     pull_requests = []
 
     while True:
-        pull_requests_url = GITEA_HOST + f"/api/v1/repos/{project}/pulls?state=open&base_branch={branch}&limit={limit}&page={page}"
+        pull_requests_url = (
+            GITEA_HOST
+            + f"/api/v1/repos/{project}/pulls?state=open&base_branch={branch}&limit={limit}&page={page}"
+        )
 
         try:
             request = request_get(pull_requests_url)
@@ -133,7 +153,9 @@ def process_pull_request(pr_id, args):
 
     pr_events = get_events_by_timeline(project, pr)
     if not is_build_finished(project, pr, pr_events, args.bs_bot):
-        log.info(f"Build for {project}#{pr} is not ready, not needed or is broken. Skipping.")
+        log.info(
+            f"Build for {project}#{pr} is not ready, not needed or is broken. Skipping."
+        )
         return
 
     obs_project, bs_repo_url, os_test_template = get_obs_values(project, branch, pr)
@@ -150,18 +172,29 @@ def process_pull_request(pr_id, args):
         log.warning(f"No packages found in {obs_project}, skipping.")
         return
 
-    settings = prepare_update_settings(project, obs_project, os_test_template, bs_repo_url, pr, packages_in_project)
+    settings = prepare_update_settings(
+        project, obs_project, os_test_template, bs_repo_url, pr, packages_in_project
+    )
     openqa_job_params = prepare_openqa_job_params(args, obs_project, data, settings)
-    openqa_build_overview, previous_review = check_openqa_comment(pr_events, args.myself)
+    openqa_build_overview, previous_review = check_openqa_comment(pr_events)
+
+    # we don't really need to check anything, if we don't need to, perhaps when building the timeline, in get_events_by_timeline
+    # we can already make this decision
+    # force a review if it is re-requested
+    # force a retrigger if we're mentioned
+    ignore_last_review, force_new_build = is_previous_review_dismissed(pr_events)
+
     # if there's a comment by us, tests have been triggered, so lets check the status
-    if openqa_build_overview:
+    if openqa_build_overview and not force_new_build:
         log.info(f"Build for {project}#{pr} has openQA tests")
         log.debug(f"openQA tests are at {openqa_build_overview}")
-        if not previous_review:
+        if not previous_review or (previous_review and ignore_last_review):
             qa_state = compute_openqa_tests_status(openqa_job_params)
             take_action(project, pr, qa_state, openqa_build_overview)
         else:
-            log.info(f"Build for {project}#{pr} has a review already by us: {previous_review}")
+            log.info(
+                f"Build for {project}#{pr} has a review already by us: {previous_review}"
+            )
     else:
         openqa_build_overview = openqa_schedule(args, openqa_job_params)
         # instead of using the statuses api, we will have to use the comments api
@@ -184,8 +217,13 @@ def take_action(project, pr, qa_state, openqa_build_overview):
             msg += f"{REVIEW_GROUP}: approve"
 
         else:
-            msg = f"openQA tests failed: {openqa_build_overview}\n"
-            msg += f"{REVIEW_GROUP}: decline"
+            msg = (
+                f"openQA tests failed: {openqa_build_overview}\n"
+                + f"{REVIEW_GROUP}: decline\n"
+                + f"\nDismiss the review for {REVIEW_GROUP} to ignore this review\n"
+                + f"The last comment that only mentions {MYSELF} will force a fresh"
+                + f"openQA build if {REVIEW_GROUP} review is till pending."
+            )
 
         gitea_post_openqa_review(project, pr, msg)
 
@@ -238,7 +276,9 @@ def is_build_finished(project, pr, pr_events, bs_bot):
     try:
         review_id = pr_events[bs_bot]["review"]["review_id"]
     except KeyError as e:
-        log.warning(f"Could not find key {e} in pr_events for {project}#{pr}. Assuming build is not finished.")
+        log.warning(
+            f"Could not find key {e} in pr_events for {project}#{pr}. Assuming build is not finished."
+        )
         return False
 
     review = get_build_review_status(project, pr, review_id)
@@ -246,7 +286,10 @@ def is_build_finished(project, pr, pr_events, bs_bot):
         if review["body"] == "Build successful":
             log.info(f"Build is finished for {project}#{pr}")
             return True
-        elif review["body"] == "No package changes, not rebuilding project by default, accepting change":
+        elif (
+            review["body"]
+            == "No package changes, not rebuilding project by default, accepting change"
+        ):
             log.info(f"No build has been triggered for {project}#{pr}")
             return False
         else:
@@ -261,8 +304,25 @@ def get_build_review_status(project, pr, review_id):
     return gitea_get_review(project, pr, review_id)
 
 
-def check_openqa_comment(pr_events, myself):
-    openqa_comment = pr_events.get(myself)
+def is_previous_review_dismissed(pr_events):
+    review_requested_by = None
+    force_build_by = None
+    for user, events in pr_events.items():
+        for event_type, event in events.items():
+            if event_type == "review_request" and not review_requested_by:
+                if f"@{event['assignee']['username']}" == REVIEW_GROUP:
+                    review_requested_by = user
+            elif event_type == "comment" and not force_build_by:
+                if f"{event['body'].strip('@ ')}" == MYSELF:
+                    force_build_by = user
+            if review_requested_by and force_build_by:
+                return review_requested_by, force_build_by
+    return review_requested_by, force_build_by
+
+
+
+def check_openqa_comment(pr_events):
+    openqa_comment = pr_events.get(MYSELF)
     openqa_build_overview = None
     previous_review = None
     if not openqa_comment or "comment" not in openqa_comment:
@@ -286,7 +346,9 @@ def check_openqa_comment(pr_events, myself):
     return openqa_build_overview, previous_review
 
 
-def prepare_update_settings(project, obs_project, os_test_template, bs_repo_url, pr, packages):
+def prepare_update_settings(
+    project, obs_project, os_test_template, bs_repo_url, pr, packages
+):
     settings = {}
     staged_update_name = get_staged_update_name(obs_project)
     build_project = project.replace("/", "_")
@@ -304,7 +366,9 @@ def prepare_update_settings(project, obs_project, os_test_template, bs_repo_url,
     settings["ZYPPER_ADD_REPO_PREFIX"] = "staged-updates"
 
     settings["INSTALL_PACKAGES"] = " ".join(packages.keys())
-    settings["VERIFY_PACKAGE_VERSIONS"] = " ".join([f"{p.name} {p.version}-{p.release}" for p in packages.values()])
+    settings["VERIFY_PACKAGE_VERSIONS"] = " ".join(
+        [f"{p.name} {p.version}-{p.release}" for p in packages.values()]
+    )
 
     return settings
 
@@ -344,7 +408,9 @@ def get_obs_values(project, branch, pr_id):
         log.error(f"Could not get version from {branch}")
         return None, None, None
 
-    obs_project = project_template.format(version=branch_version, project=project, pr_id=pr_id)
+    obs_project = project_template.format(
+        version=branch_version, project=project, pr_id=pr_id
+    )
     target_repo = REPO_PREFIX + "/"
     target_repo += obs_project.replace(":", ":/")
 
@@ -355,7 +421,7 @@ def get_obs_values(project, branch, pr_id):
     return obs_project, target_repo, os_test_template_setting
 
 
-VERSION_PATTERN = re.compile(r'(\d+\.\d+)')
+VERSION_PATTERN = re.compile(r"(\d+\.\d+)")
 
 
 def _extract_version_from_branch(branch):
@@ -385,7 +451,9 @@ def get_packages_from_obs_project(obs_project):
     for arch in [n.attrib["name"] for n in root.findall("entry")]:
         query = {"nosource": 1}
         # packages/binary = osc api /build/{obs_project}/{repo}/{arch}/_repository?nosource=1
-        url = osc.core.makeurl(BS_HOST, ("build", obs_project, repo, arch, "_repository"), query=query)
+        url = osc.core.makeurl(
+            BS_HOST, ("build", obs_project, repo, arch, "_repository"), query=query
+        )
         root = ET.parse(osc.core.http_GET(url)).getroot()
 
         for binary in root.findall("binary"):
@@ -452,7 +520,17 @@ def gitea_post_openqa_review(project, pr_id, msg):
 
 def gitea_get_review(project, pr_id, review_id):
     log.debug("============== gitea_get_review")
-    review_url = GITEA_HOST + f"/api/v1/repos/{project}/pulls/{pr_id}/reviews/{review_id}"
+    review_url = (
+        GITEA_HOST + f"/api/v1/repos/{project}/pulls/{pr_id}/reviews/{review_id}"
+    )
+    return request_get(review_url)
+
+
+def gitea_list_reviews(project, pr):
+    log.debug("============== gitea_get_review")
+    review_url = (
+        GITEA_HOST + f"/api/v1/repos/{project}/pulls/{pr_id}/reviews/{review_id}"
+    )
     return request_get(review_url)
 
 
@@ -463,7 +541,10 @@ def get_events_by_timeline(project, pr_id):
     timeline = []
 
     while True:
-        url = GITEA_HOST + f"/api/v1/repos/{project}/issues/{pr_id}/timeline?limit={limit}&page={page}"
+        url = (
+            GITEA_HOST
+            + f"/api/v1/repos/{project}/issues/{pr_id}/timeline?limit={limit}&page={page}"
+        )
         request = request_get(url)
 
         if not request:
@@ -482,7 +563,9 @@ def get_events_by_timeline(project, pr_id):
     # reset the timeline every time a pull_push event happens
     for event in timeline:
         if event["type"] == "pull_push":
-            log.debug(f"*** All events since last push ({event['body']}) have been processed for {project}#{pr_id}")
+            log.debug(
+                f"*** All events since last push ({event['body']}) have been processed for {project}#{pr_id}"
+            )
             break
 
         user_login = event["user"]["login"]
@@ -492,10 +575,14 @@ def get_events_by_timeline(project, pr_id):
             events[user_login] = {}
 
         if event_type not in events[user_login]:
-            log.debug(f"Storing most recent '{event_type}' for '{user_login}' (ID: {event['id']})")
+            log.debug(
+                f"Storing most recent '{event_type}' for '{user_login}' (ID: {event['id']})"
+            )
             events[user_login][event_type] = event
         else:
-            log.debug(f"Skipping older '{event_type}' for '{user_login}' (ID: {event['id']})")
+            log.debug(
+                f"Skipping older '{event_type}' for '{user_login}' (ID: {event['id']})"
+            )
 
     return events
 
@@ -539,7 +626,10 @@ def request_get(url):
 
 def prepare_openqa_job_params(args, obs_project, data, settings):
     log.debug("create_openqa_job_params")
-    statuses_url = GITEA_HOST + f"/api/v1/repos/{data['head']['repo']['full_name']}/statuses/{data['head']['sha']}"
+    statuses_url = (
+        GITEA_HOST
+        + f"/api/v1/repos/{data['head']['repo']['full_name']}/statuses/{data['head']['sha']}"
+    )
     params = {
         "PRIO": "100",
         # add "target URL" for the "Details" button of the CI status
@@ -562,7 +652,7 @@ def openqa_schedule(args, params):
     log.debug("============== openqa_schedule")
 
     if not openqa_dry_run:
-        openqa.openqa_request('POST', 'isos', data=params, retries=1)
+        openqa.openqa_request("POST", "isos", data=params, retries=1)
 
     query_parameters = {
         "build": params["BUILD"],
@@ -588,21 +678,26 @@ if __name__ == "__main__":
 
     if token_file_path:
         try:
-            with open(token_file_path, 'r') as f:
+            with open(token_file_path, "r") as f:
                 gitea_token = f.read().strip()
         except (IOError, FileNotFoundError) as e:
-            raise RuntimeError(f"Error reading GITEA_TOKEN_FILE '{token_file_path}': {e}")
+            raise RuntimeError(
+                f"Error reading GITEA_TOKEN_FILE '{token_file_path}': {e}"
+            )
     else:
         gitea_token = os.environ.get("GITEA_TOKEN")
 
     if not gitea_token:
-        raise RuntimeError("Environment variable GITEA_TOKEN or GITEA_TOKEN_FILE must be set")
+        raise RuntimeError(
+            "Environment variable GITEA_TOKEN or GITEA_TOKEN_FILE must be set"
+        )
 
     GITEA_TOKEN = gitea_token
     GITEA_HOST = args.gitea
     BS_HOST = args.bs
     REPO_PREFIX = args.repo_prefix
     REVIEW_GROUP = args.review_group
+    MYSELF = args.myself
     osc.conf.get_config()
     openqa = OpenQA_Client(server=args.openqa_host)
     if args.pr_id:
