@@ -4,6 +4,7 @@ import os
 import re
 import argparse
 import requests
+import json
 import logging
 from openqa_client.client import OpenQA_Client
 from urllib.parse import urlencode, urlunparse, urlparse
@@ -13,6 +14,7 @@ import osc.core
 
 dry_run = True
 openqa_dry_run = True
+STORE_TIMELINE = False
 USER_AGENT = (
     "git-openqa-maintenance (https://github.com/openSUSE/openSUSE-release-tools)"
 )
@@ -88,6 +90,11 @@ def parse_args():
         "--repo-prefix",
         help="Build service repository",
         default="http://download.opensuse.org/repositories",
+    )
+    parser.add_argument(
+        "--store-timeline",
+        action="store_true",
+        help="Store timeline events in a JSON file",
     )
 
     args = parser.parse_args()
@@ -301,7 +308,10 @@ def openqa_restart_failed_tests(openqa_job_params):
     jobs = openqa.openqa_request("GET", "jobs", values)["jobs"]
     for job in jobs:
         log.info(f"Restarting failed test {job['id']} ({job['name']})")
-        openqa.openqa_request("POST", f"jobs/{job['id']}/restart")
+        if not openqa_dry_run:
+            openqa.openqa_request("POST", f"jobs/{job['id']}/restart")
+        else:
+            log.info(f"Would restart failed test {job['id']} ({job['name']})")
 
 
 def is_build_finished(project, pr, review_id):
@@ -545,7 +555,12 @@ def get_events_by_timeline(project, pr_id, bs_bot):
 
         page += 1
 
+    
     timeline.reverse()
+
+    if STORE_TIMELINE:
+        with open(f"timeline_{project.replace('/', '_')}_{pr_id}.json", "w") as f:
+            json.dump(timeline, f, indent=4)
 
     build_review_id = None
     openqa_build_overview = None
@@ -695,6 +710,7 @@ if __name__ == "__main__":
     REPO_PREFIX = args.repo_prefix
     REVIEW_GROUP = args.review_group
     MYSELF = args.myself
+    STORE_TIMELINE = args.store_timeline
     osc.conf.get_config()
     openqa = OpenQA_Client(server=args.openqa_host)
     if args.pr_id:
