@@ -151,8 +151,8 @@ def process_pull_request(pr_id, args):
         log.error(f"PR {project}#{pr} does not match target {args.branch}, skipping")
         return
 
-    pr_events = get_events_by_timeline(project, pr)
-    if not is_build_finished(project, pr, pr_events, args.bs_bot):
+    build_review_id, openqa_build_overview, previous_review, ignore_last_review, force_new_build = get_events_by_timeline(project, pr, args.bs_bot)
+    if not is_build_finished(project, pr, build_review_id):
         log.info(
             f"Build for {project}#{pr} is not ready, not needed or is broken. Skipping."
         )
@@ -166,7 +166,6 @@ def process_pull_request(pr_id, args):
 
     # We need to query every package in the staged update
     packages_in_project = get_packages_from_obs_project(obs_project)
-    openqa_build_overview = None
 
     if not packages_in_project:
         log.warning(f"No packages found in {obs_project}, skipping.")
@@ -176,32 +175,46 @@ def process_pull_request(pr_id, args):
         project, obs_project, os_test_template, bs_repo_url, pr, packages_in_project
     )
     openqa_job_params = prepare_openqa_job_params(args, obs_project, data, settings)
-    openqa_build_overview, previous_review = check_openqa_comment(pr_events)
 
-    # we don't really need to check anything, if we don't need to, perhaps when building the timeline, in get_events_by_timeline
-    # we can already make this decision
-    # force a review if it is re-requested
-    # force a retrigger if we're mentioned
-    ignore_last_review, force_new_build = is_previous_review_dismissed(pr_events)
+    openqa_trigger_reason = f"Build for {project}#{pr} has no openQA tests yet"
+    openqa_trigger_tests = False
 
     # if there's a comment by us, tests have been triggered, so lets check the status
     if openqa_build_overview and not force_new_build:
         log.info(f"Build for {project}#{pr} has openQA tests")
         log.debug(f"openQA tests are at {openqa_build_overview}")
-        if not previous_review or (previous_review and ignore_last_review):
+
+        if not previous_review:
             qa_state = compute_openqa_tests_status(openqa_job_params)
             take_action(project, pr, qa_state, openqa_build_overview)
+        elif ignore_last_review:
+            log.info(
+                f"Build for {project}#{pr} has a review by us, but it has been dismissed. Checking tests again"
+            )
+
+            openqa_trigger_reason = "Not needed"
+            openqa_restart_failed_tests(openqa_job_params)
+
         else:
             log.info(
                 f"Build for {project}#{pr} has a review already by us: {previous_review}"
             )
+
     else:
-        openqa_build_overview = openqa_schedule(args, openqa_job_params)
+        openqa_trigger_tests = True
+        openqa_trigger_reason = "A new openQA build is being requested" if force_new_build else openqa_trigger_reason
+
+    if openqa_trigger_tests:
+        log.info(f"Triggering openQA tests for {project}#{pr} - Reason: {openqa_trigger_reason}")
+        trigger_openqa_build(args, pr, project, openqa_job_params)
+
+def trigger_openqa_build(args, pr, project, openqa_job_params):
+    openqa_build_overview = openqa_schedule(args, openqa_job_params)
         # instead of using the statuses api, we will have to use the comments api
         # to report that tests have been triggered, and approve
         # gitea_post_status(openqa_job_params["GITEA_STATUSES_URL"], openqa_build_overview)
-        gitea_post_build_overview(project, pr, openqa_build_overview)
-        log.info(f"Build triggered, results at {openqa_build_overview}")
+    gitea_post_build_overview(project, pr, openqa_build_overview)
+    log.info(f"Build triggered, results at {openqa_build_overview}")
 
 
 def take_action(project, pr, qa_state, openqa_build_overview):
@@ -271,13 +284,30 @@ def compute_openqa_tests_status(openqa_job_params):
 
     return QA_PASSED
 
+def openqa_restart_failed_tests(openqa_job_params):
+    values = {
+        "distri": openqa_job_params["DISTRI"],
+        "version": openqa_job_params["VERSION"],
+        "arch": openqa_job_params["ARCH"],
+        "flavor": openqa_job_params["FLAVOR"],
+        "build": openqa_job_params["BUILD"],
+        # result__not=none&result__not=passed&result__not=softfailed
+        "result__not": "none",
+        "result__not": "passed",
+        "result__not": "softfailed",
+        "scope": "relevant",
+        "latest": "1",
+    }
+    jobs = openqa.openqa_request("GET", "jobs", values)["jobs"]
+    for job in jobs:
+        log.info(f"Restarting failed test {job['id']} ({job['name']})")
+        openqa.openqa_request("POST", f"jobs/{job['id']}/restart")
 
-def is_build_finished(project, pr, pr_events, bs_bot):
-    try:
-        review_id = pr_events[bs_bot]["review"]["review_id"]
-    except KeyError as e:
+
+def is_build_finished(project, pr, review_id):
+    if not review_id:
         log.warning(
-            f"Could not find key {e} in pr_events for {project}#{pr}. Assuming build is not finished."
+            f"Could not find build review_id for {project}#{pr}. Assuming build is not finished."
         )
         return False
 
@@ -302,48 +332,6 @@ def is_build_finished(project, pr, pr_events, bs_bot):
 
 def get_build_review_status(project, pr, review_id):
     return gitea_get_review(project, pr, review_id)
-
-
-def is_previous_review_dismissed(pr_events):
-    review_requested_by = None
-    force_build_by = None
-    for user, events in pr_events.items():
-        for event_type, event in events.items():
-            if event_type == "review_request" and not review_requested_by:
-                if f"@{event['assignee']['username']}" == REVIEW_GROUP:
-                    review_requested_by = user
-            elif event_type == "comment" and not force_build_by:
-                if f"{event['body'].strip('@ ')}" == MYSELF:
-                    force_build_by = user
-            if review_requested_by and force_build_by:
-                return review_requested_by, force_build_by
-    return review_requested_by, force_build_by
-
-
-
-def check_openqa_comment(pr_events):
-    openqa_comment = pr_events.get(MYSELF)
-    openqa_build_overview = None
-    previous_review = None
-    if not openqa_comment or "comment" not in openqa_comment:
-        return openqa_build_overview, previous_review
-
-    openqa_url_pattern = re.compile(r"https?://[^\s]+/tests/overview\?[^\s]+")
-    match = openqa_url_pattern.search(openqa_comment["comment"]["body"])
-
-    if match:
-        log.info(f"openQA build url found {match.group(0)}")
-        log.debug(f"openQA build url found '{openqa_comment['comment']['body']}'")
-        openqa_build_overview = match.group(0)
-
-        # If we find a match for the openQA url, try looking into the comment's
-        # body to search for a review:
-        qam_review_pattern = re.compile(f"{REVIEW_GROUP}:\\s*(.*)")
-        previous_review = qam_review_pattern.search(openqa_comment["comment"]["body"])
-        if previous_review:
-            previous_review = openqa_comment["comment"]["body"]
-
-    return openqa_build_overview, previous_review
 
 
 def prepare_update_settings(
@@ -534,7 +522,7 @@ def gitea_list_reviews(project, pr):
     return request_get(review_url)
 
 
-def get_events_by_timeline(project, pr_id):
+def get_events_by_timeline(project, pr_id, bs_bot):
     log.debug("============== get_events_by_timeline")
     limit = 50
     page = 1
@@ -559,8 +547,12 @@ def get_events_by_timeline(project, pr_id):
 
     timeline.reverse()
 
-    events = {}
-    # reset the timeline every time a pull_push event happens
+    build_review_id = None
+    openqa_build_overview = None
+    previous_review = None
+    ignore_last_review = False
+    force_new_build = False
+
     for event in timeline:
         if event["type"] == "pull_push":
             log.debug(
@@ -568,23 +560,28 @@ def get_events_by_timeline(project, pr_id):
             )
             break
 
-        user_login = event["user"]["login"]
-        event_type = event["type"]
+        user_login = event.get("user", {}).get("login")
+        event_type = event.get("type")
 
-        if user_login not in events:
-            events[user_login] = {}
+        if event_type == "review" and user_login == bs_bot and not build_review_id:
+            build_review_id = event.get("review_id")
+        elif event_type == "comment":
+            body = event.get("body", "")
+            if user_login == MYSELF and not openqa_build_overview:
+                match = re.search(r"https?://[^\s]+/tests/overview\?[^\s]+", body)
+                if match:
+                    log.info(f"openQA build url found {match.group(0)}")
+                    log.debug(f"openQA build url found '{body}'")
+                    openqa_build_overview = match.group(0)
+                    if re.search(f"{REVIEW_GROUP}:\\s*(.*)", body):
+                        previous_review = body
+            if not force_new_build and body.strip("@ ") == MYSELF:
+                force_new_build = True
+        elif event_type == "review_request" and not ignore_last_review:
+            if f"@{event.get('assignee', {}).get('username')}" == REVIEW_GROUP:
+                ignore_last_review = True
 
-        if event_type not in events[user_login]:
-            log.debug(
-                f"Storing most recent '{event_type}' for '{user_login}' (ID: {event['id']})"
-            )
-            events[user_login][event_type] = event
-        else:
-            log.debug(
-                f"Skipping older '{event_type}' for '{user_login}' (ID: {event['id']})"
-            )
-
-    return events
+    return build_review_id, openqa_build_overview, previous_review, ignore_last_review, force_new_build
 
 
 def request_post(url, payload):
