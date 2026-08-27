@@ -10,8 +10,6 @@
          },
          "test": "textmode",
          "repos": [
-            "http://download.opensuse.org/update/leap/15.6/oss/",
-            "http://download.opensuse.org/update/leap/15.6/non-oss/",
             "http://download.opensuse.org/update/leap/15.6/backports/",
             "http://download.opensuse.org/update/leap/15.6/sle/"
          ]
