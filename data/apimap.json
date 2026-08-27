@@ -1,11 +1,11 @@
 {
-  "openSUSE:Leap:15.6:Update" : {
-    "version": "15.6",
-    "flavor": "DVD-Incidents",
-    "distri": "opensuse"
-  },
   "openSUSE:Backports:SLE-15-SP6:Update" : {
     "version": "15.6",
+    "flavor": "DVD-Backports-Incidents",
+    "distri": "opensuse"
+  },
+  "openSUSE:Backports:SLE-15-SP7:Update" : {
+    "version": "15.7",
     "flavor": "DVD-Backports-Incidents",
     "distri": "opensuse"
   }
